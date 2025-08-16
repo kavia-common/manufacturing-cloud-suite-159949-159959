@@ -1,6 +1,7 @@
 """
 ORM models for domain entities across production, inventory, procurement,
-sales, quality, maintenance, and analytics.
+sales, quality, maintenance, analytics, and master data such as UoM, items,
+work centers, routings and BOMs.
 
 Importing this package ensures model classes are registered with the Base
 metadata for Alembic and runtime usage.
@@ -42,4 +43,13 @@ from .maintenance import (  # noqa: F401
 from .analytics import (  # noqa: F401
     Event,
     KpiMeasurement,
+)
+from .master_data import (  # noqa: F401
+    UnitOfMeasure,
+    Item,
+    WorkCenter,
+    Routing,
+    RoutingOperation,
+    Bom,
+    BomLine,
 )
