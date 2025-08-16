@@ -16,6 +16,13 @@ from src.schemas.common import MessageResponse, TenantEcho
 from src.api.routes.auth import router as auth_router
 from src.api.routes.users import router as users_router
 from src.api.routes.roles import router as roles_router
+# Domain routers
+from src.api.routes.inventory import router as inventory_router
+from src.api.routes.procurement import router as procurement_router
+from src.api.routes.production import router as production_router
+from src.api.routes.master_data import router as masterdata_router
+from src.api.routes.quality import router as quality_router
+from src.api.routes.scheduling import router as scheduling_router
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +35,12 @@ openapi_tags = [
     {"name": "Auth", "description": "Authentication and token endpoints."},
     {"name": "Users", "description": "User administration endpoints."},
     {"name": "Roles", "description": "Role administration endpoints."},
+    {"name": "Inventory", "description": "Inventory locations, lots, transactions."},
+    {"name": "Procurement", "description": "Suppliers and purchase orders."},
+    {"name": "Production", "description": "Work orders and operations."},
+    {"name": "Master Data", "description": "Items/products and BOMs."},
+    {"name": "Quality", "description": "Inspections and nonconformances."},
+    {"name": "Scheduling", "description": "Planner/scheduler feeds."},
     {
         "name": "WebSocket",
         "description": "WebSocket usage, endpoints, and connection details.",
@@ -145,6 +158,13 @@ def websocket_info() -> Dict[str, Any]:
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(roles_router)
+# Domain routers
+app.include_router(masterdata_router)
+app.include_router(inventory_router)
+app.include_router(procurement_router)
+app.include_router(production_router)
+app.include_router(quality_router)
+app.include_router(scheduling_router)
 
 
 # Example dependency wiring for future endpoints:
