@@ -19,7 +19,7 @@ from src.db.models.quality import Nonconformance
 
 # PUBLIC_INTERFACE
 router = APIRouter(
-    prefix="/api/v1/reports",
+    prefix="/reports",
     tags=["Reports"],
 )
 

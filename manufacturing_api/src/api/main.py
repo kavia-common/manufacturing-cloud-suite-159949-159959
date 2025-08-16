@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi import WebSocket, WebSocketDisconnect
-
 
 from src.core.settings import get_app_settings
 from src.core.deps import get_tenant_id
 from src.core.security import decode_token
+from src.core.logging import configure_logging, correlation_id_var, tenant_id_var
 from src.db.run_migrations import main as run_alembic
 from src.db.seed import seed_all
-from src.schemas.common import MessageResponse, TenantEcho
+from src.schemas.common import ErrorInfo, ErrorResponse, MessageResponse, TenantEcho
 from src.schemas.realtime import WsEnvelope
 from src.services.realtime import broadcast_manager
 from src.services.production import ProductionService
@@ -33,8 +37,9 @@ from src.api.routes.quality import router as quality_router
 from src.api.routes.scheduling import router as scheduling_router
 from src.api.routes.reports import router as reports_router
 
+# Configure structured logging once at import
+configure_logging()
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 settings = get_app_settings()
 
@@ -54,6 +59,7 @@ openapi_tags = [
         "name": "WebSocket",
         "description": "WebSocket usage, endpoints, and connection details.",
     },
+    {"name": "Reports", "description": "Exportable business reports (CSV/Excel/PDF)."},
 ]
 
 app = FastAPI(
@@ -63,14 +69,117 @@ app = FastAPI(
     openapi_tags=openapi_tags,
 )
 
-# CORS
+# CORS - avoid wildcard with credentials
+cors_allow_credentials = settings.CORS_ALLOW_CREDENTIALS
+if settings.CORS_ORIGINS == ["*"] and cors_allow_credentials:
+    logger.warning("CORS_ALLOW_CREDENTIALS=True with '*' origins is not permitted; disabling credentials.")
+    cors_allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_credentials=cors_allow_credentials,
     allow_methods=settings.CORS_ALLOW_METHODS,
     allow_headers=settings.CORS_ALLOW_HEADERS,
 )
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """
+    Enrich request context with correlation_id and tenant_id for logging and error responses.
+    Adds 'X-Correlation-ID' to every response.
+    """
+    corr = request.headers.get("X-Correlation-ID") or request.headers.get("X-Request-ID") or str(uuid4())
+    tenant = request.headers.get("X-Tenant-ID")
+    # Set context vars for this request lifecycle
+    token_corr = correlation_id_var.set(corr)
+    token_tenant = tenant_id_var.set(tenant)
+    request.state.correlation_id = corr
+    request.state.tenant_id = tenant
+
+    logger.info("Incoming request %s %s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        # Let the global exception handlers format response consistently
+        correlation_id_var.reset(token_corr)
+        tenant_id_var.reset(token_tenant)
+        raise exc
+
+    response.headers["X-Correlation-ID"] = corr
+    # Restore previous context
+    correlation_id_var.reset(token_corr)
+    tenant_id_var.reset(token_tenant)
+    return response
+
+
+def _build_error_response(
+    request: Request,
+    status_code: int,
+    error_type: str,
+    message: str,
+    details: Any | None = None,
+) -> JSONResponse:
+    """Build a standardized ErrorResponse JSONResponse."""
+    ts = datetime.now(tz=timezone.utc)
+    corr = getattr(request.state, "correlation_id", None)
+    tenant = getattr(request.state, "tenant_id", None)
+    err = ErrorResponse(
+        status=status_code,
+        error=ErrorInfo(type=error_type, message=message, details=details),
+        correlation_id=corr,
+        tenant_id=tenant,
+        path=request.url.path,
+        method=request.method,
+        timestamp=ts,
+    )
+    return JSONResponse(status_code=status_code, content=err.model_dump(mode="json"))
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Global handler for HTTPException to produce a standardized error envelope.
+    """
+    # For validation errors fastapi may wrap, but they are handled by RequestValidationError
+    detail = exc.detail if isinstance(exc.detail, str) else "HTTP Error"
+    return _build_error_response(
+        request=request,
+        status_code=exc.status_code,
+        error_type="http_error",
+        message=str(detail),
+        details=None if isinstance(exc.detail, str) else exc.detail,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Global handler for request validation errors with a standard structure.
+    """
+    return _build_error_response(
+        request=request,
+        status_code=422,
+        error_type="validation_error",
+        message="Request validation failed",
+        details=exc.errors(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all handler to avoid leaking stack traces and to return a structured error.
+    """
+    logger.exception("Unhandled error processing request")
+    return _build_error_response(
+        request=request,
+        status_code=500,
+        error_type="internal_error",
+        message="An unexpected error occurred",
+        details=None,
+    )
 
 
 @app.on_event("startup")
@@ -99,9 +208,12 @@ async def on_startup() -> None:
             # Safe to continue without seed; environments may not require it.
 
 
+# Build API v1 router and include sub-routers
+api_v1 = APIRouter(prefix="/api/v1")
+
 # PUBLIC_INTERFACE
-@app.get(
-    "/",
+@api_v1.get(
+    "/health",
     response_model=MessageResponse,
     summary="Health Check",
     tags=["Health"],
@@ -117,7 +229,7 @@ def health_check() -> MessageResponse:
 
 
 # PUBLIC_INTERFACE
-@app.get(
+@api_v1.get(
     "/health/tenant",
     response_model=TenantEcho,
     summary="Tenant Health Echo",
@@ -137,7 +249,7 @@ async def tenant_health_echo(tenant_id=Depends(get_tenant_id)) -> TenantEcho:
 
 
 # PUBLIC_INTERFACE
-@app.get(
+@api_v1.get(
     "/websocket-info",
     response_model=Dict[str, Any],
     summary="WebSocket Usage Information",
@@ -188,18 +300,21 @@ def websocket_info() -> Dict[str, Any]:
         "notes": "WebSocket endpoints are not represented in OpenAPI schema; refer to this endpoint for usage."
     }
 
-# Register routers
-app.include_router(auth_router)
-app.include_router(users_router)
-app.include_router(roles_router)
-# Domain routers
-app.include_router(masterdata_router)
-app.include_router(inventory_router)
-app.include_router(procurement_router)
-app.include_router(production_router)
-app.include_router(quality_router)
-app.include_router(scheduling_router)
-app.include_router(reports_router)
+
+# Include all routers under /api/v1
+api_v1.include_router(auth_router)
+api_v1.include_router(users_router)
+api_v1.include_router(roles_router)
+api_v1.include_router(masterdata_router)
+api_v1.include_router(inventory_router)
+api_v1.include_router(procurement_router)
+api_v1.include_router(production_router)
+api_v1.include_router(quality_router)
+api_v1.include_router(scheduling_router)
+api_v1.include_router(reports_router)
+
+# Attach api_v1 to app
+app.include_router(api_v1)
 
 
 async def _validate_ws_and_get_user(websocket: WebSocket) -> tuple[str, str]:
@@ -376,19 +491,3 @@ async def ws_scheduler(websocket: WebSocket):
         logger.exception("Error on ws_scheduler connection")
         await broadcast_manager.disconnect(topic, websocket)
         await websocket.close()
-
-
-# Example dependency wiring for future endpoints:
-# from fastapi import APIRouter
-# router = APIRouter(prefix="/inventory", tags=["Inventory"])
-#
-# @router.get("/locations", response_model=list[LocationRead])
-# async def list_locations(
-#     session=Depends(get_tenant_session),
-#     limit: int = 100, offset: int = 0,
-# ):
-#     repo = LocationRepository(session)
-#     records = await repo.list_locations(limit=limit, offset=offset)
-#     return [LocationRead.model_validate(r) for r in records]
-#
-# app.include_router(router)

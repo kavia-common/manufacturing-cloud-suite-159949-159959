@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -33,3 +33,22 @@ class MessageResponse(BaseModel):
 class TenantEcho(BaseModel):
     """Model to echo tenant context."""
     tenant_id: UUID = Field(..., description="Tenant ID extracted from request header")
+
+
+class ErrorInfo(BaseModel):
+    """Structured error description."""
+    type: str = Field(..., description="Machine-readable error type code")
+    message: str = Field(..., description="Human-readable error message")
+    details: Optional[Any] = Field(default=None, description="Optional error details (e.g., validation issues)")
+
+
+# PUBLIC_INTERFACE
+class ErrorResponse(BaseModel):
+    """Standardized API error envelope returned by exception handlers."""
+    status: int = Field(..., description="HTTP status code")
+    error: ErrorInfo = Field(..., description="Error details")
+    correlation_id: Optional[str] = Field(default=None, description="Request correlation ID")
+    tenant_id: Optional[str] = Field(default=None, description="Tenant ID (if available)")
+    path: Optional[str] = Field(default=None, description="Request path")
+    method: Optional[str] = Field(default=None, description="HTTP method")
+    timestamp: datetime = Field(..., description="Error timestamp (UTC)")

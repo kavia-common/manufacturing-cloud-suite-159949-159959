@@ -16,7 +16,7 @@ from src.repositories.security import SecurityRepository
 logger = logging.getLogger(__name__)
 
 # OAuth2 bearer (used by docs); login endpoint path referenced here
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 # PUBLIC_INTERFACE

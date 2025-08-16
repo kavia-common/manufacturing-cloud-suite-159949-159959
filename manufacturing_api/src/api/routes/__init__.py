@@ -6,5 +6,5 @@ This package contains subrouters for:
 - Users: user CRUD and role assignment
 - Roles: role CRUD
 
-Routers are included from src.api.main.
+Routers are included from src.api.main (under the /api/v1 prefix).
 """

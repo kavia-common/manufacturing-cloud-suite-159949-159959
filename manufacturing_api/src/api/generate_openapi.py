@@ -3,7 +3,7 @@ import os
 
 from src.api.main import app
 
-# Get the OpenAPI schema
+# Get the OpenAPI schema (note: all REST routes are under /api/v1)
 openapi_schema = app.openapi()
 
 # Ensure Reports tag metadata is present
