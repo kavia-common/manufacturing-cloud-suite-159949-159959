@@ -6,6 +6,27 @@ from src.api.main import app
 # Get the OpenAPI schema
 openapi_schema = app.openapi()
 
+# Inject non-standard extension with WebSocket endpoint docs
+openapi_schema["x-websocket-endpoints"] = [
+    {
+        "path": "/ws/dashboard",
+        "summary": "Real-time dashboard KPI snapshots",
+        "query": ["token"],
+        "headers": ["X-Tenant-ID"],
+        "messages": {"server_to_client": ["kpi.snapshot"]},
+    },
+    {
+        "path": "/ws/scheduler",
+        "summary": "Real-time collaborative scheduler board",
+        "query": ["token", "board?"],
+        "headers": ["X-Tenant-ID"],
+        "messages": {
+            "client_to_server": ["schedule.update", "operation.move", "operation.assign", "ping"],
+            "server_to_client": ["scheduler.schedule.update", "scheduler.operation.move", "scheduler.operation.assign", "kpi.snapshot"],
+        },
+    },
+]
+
 # Write to file
 output_dir = "interfaces"
 os.makedirs(output_dir, exist_ok=True)

@@ -5,12 +5,20 @@ from typing import Any, Dict
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import WebSocket, WebSocketDisconnect
+
 
 from src.core.settings import get_app_settings
 from src.core.deps import get_tenant_id
+from src.core.security import decode_token
 from src.db.run_migrations import main as run_alembic
 from src.db.seed import seed_all
 from src.schemas.common import MessageResponse, TenantEcho
+from src.schemas.realtime import WsEnvelope
+from src.services.realtime import broadcast_manager
+from src.services.production import ProductionService
+from src.db.session import get_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 # Routers
 from src.api.routes.auth import router as auth_router
@@ -143,15 +151,40 @@ def websocket_info() -> Dict[str, Any]:
     Describe how to connect to WebSocket endpoints in this service.
 
     Returns:
-        JSON object with 'usage' notes and 'endpoints' list.
+        JSON object with usage notes and endpoints list describing query params, headers, and message format.
     """
     return {
         "usage": (
-            "WebSocket endpoints will be documented here. In general, connect to "
-            "ws(s)://<host>/ws/<topic>?token=<JWT> and include X-Tenant-ID header "
-            "as applicable. Messages use JSON frames with 'type' and 'payload'."
+            "Connect with a valid user JWT as a 'token' query parameter and include the 'X-Tenant-ID' header. "
+            "For scheduler collaboration, clients may send messages which are re-broadcast to all subscribers. "
+            "Message format is JSON with fields: { type: string, payload: object, at: ISO-8601, user_id?: string, channel?: string }."
         ),
-        "endpoints": [],
+        "security": {
+            "token": "JWT must contain 'sub' (user id) and 'tenant_id' matching the X-Tenant-ID header.",
+            "header": "X-Tenant-ID: UUID"
+        },
+        "endpoints": [
+            {
+                "path": "/ws/dashboard",
+                "summary": "Real-time dashboard KPI snapshots (server push).",
+                "query": ["token"],
+                "headers": ["X-Tenant-ID"],
+                "messages": {
+                    "server_to_client": ["kpi.snapshot"]
+                }
+            },
+            {
+                "path": "/ws/scheduler",
+                "summary": "Real-time collaborative scheduler board.",
+                "query": ["token", "board?"],
+                "headers": ["X-Tenant-ID"],
+                "messages": {
+                    "client_to_server": ["schedule.update", "operation.move", "operation.assign", "ping"],
+                    "server_to_client": ["scheduler.schedule.update", "scheduler.operation.move", "scheduler.operation.assign", "kpi.snapshot"]
+                }
+            }
+        ],
+        "notes": "WebSocket endpoints are not represented in OpenAPI schema; refer to this endpoint for usage."
     }
 
 # Register routers
@@ -165,6 +198,182 @@ app.include_router(procurement_router)
 app.include_router(production_router)
 app.include_router(quality_router)
 app.include_router(scheduling_router)
+
+
+async def _validate_ws_and_get_user(websocket: WebSocket) -> tuple[str, str]:
+    """
+    Validate WebSocket connection by checking 'token' query param and 'X-Tenant-ID' header.
+
+    Returns:
+        (tenant_id, user_id)
+    Raises:
+        WebSocketDisconnect if invalid.
+    """
+    token = websocket.query_params.get("token")
+    tenant_id = websocket.headers.get("x-tenant-id")
+    if not token or not tenant_id:
+        # We must accept first to send close code details. If not yet accepted, accept then close.
+        try:
+            await websocket.accept()
+        except Exception:
+            pass
+        await websocket.close(code=4401)
+        raise WebSocketDisconnect(code=4401)
+
+    try:
+        claims = decode_token(token)
+    except Exception:
+        try:
+            await websocket.accept()
+        except Exception:
+            pass
+        await websocket.close(code=4401)
+        raise WebSocketDisconnect(code=4401)
+
+    if str(claims.get("tenant_id")) != str(tenant_id):
+        try:
+            await websocket.accept()
+        except Exception:
+            pass
+        await websocket.close(code=4403)
+        raise WebSocketDisconnect(code=4403)
+
+    user_id = claims.get("sub")
+    if not user_id:
+        try:
+            await websocket.accept()
+        except Exception:
+            pass
+        await websocket.close(code=4401)
+        raise WebSocketDisconnect(code=4401)
+
+    return str(tenant_id), str(user_id)
+
+
+# PUBLIC_INTERFACE
+@app.websocket("/ws/dashboard")
+async def ws_dashboard(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time dashboard KPI updates.
+
+    Security:
+      - Query param 'token' must be a valid JWT.
+      - Header 'X-Tenant-ID' must match JWT tenant_id.
+    Messages:
+      - Server -> Client: type='kpi.snapshot' payload=KpiSnapshot
+      - Client -> Server: optional 'ping' to keepalive; other messages ignored.
+    """
+    await websocket.accept()
+    try:
+        tenant_id, user_id = await _validate_ws_and_get_user(websocket)
+    except WebSocketDisconnect:
+        return
+
+    topic = broadcast_manager.dashboard_topic(tenant_id)
+    await broadcast_manager.connect(topic, websocket)
+
+    # Send initial KPI snapshot on connect
+    try:
+        # Create a session to compute initial KPIs within tenant context
+        engine = get_engine()
+        maker = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False, autocommit=False)
+        async with maker() as session:
+            from src.db.session import tenant_context as _tenant_context
+            async with _tenant_context(session, tenant_id):
+                svc = ProductionService(session)
+                snapshot = await svc._compute_kpis_snapshot()
+        env = WsEnvelope(type="kpi.snapshot", payload=snapshot.model_dump()).model_dump()
+        await websocket.send_json(env)
+    except Exception:
+        logger.exception("Failed to send initial KPI snapshot")
+
+    try:
+        while True:
+            # Receive but ignore client messages except ping
+            msg = await websocket.receive_text()
+            if msg and msg.lower() == "ping":
+                await websocket.send_text("pong")
+            # otherwise ignore client messages for dashboard
+    except WebSocketDisconnect:
+        await broadcast_manager.disconnect(topic, websocket)
+    except Exception:
+        logger.exception("Error on ws_dashboard connection")
+        await broadcast_manager.disconnect(topic, websocket)
+        await websocket.close()
+
+
+# PUBLIC_INTERFACE
+@app.websocket("/ws/scheduler")
+async def ws_scheduler(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time collaborative scheduler updates.
+
+    Security:
+      - Query param 'token' must be a valid JWT.
+      - Header 'X-Tenant-ID' must match JWT tenant_id.
+
+    Query Parameters:
+      - token: JWT bearer token
+      - board: Optional channel/board key
+
+    Messages:
+      - Client -> Server:
+          type: 'schedule.update' | 'operation.move' | 'operation.assign' | 'ping'
+          payload: object
+      - Server -> Client:
+          Rebroadcasts as 'scheduler.<type>' envelopes to all subscribers.
+
+    Notes:
+      The server does not persist scheduler messages here; persistence should be handled
+      by REST endpoints or other dedicated routes. This channel is for collaboration.
+    """
+    await websocket.accept()
+    try:
+        tenant_id, user_id = await _validate_ws_and_get_user(websocket)
+    except WebSocketDisconnect:
+        return
+
+    board = websocket.query_params.get("board")
+    topic = broadcast_manager.scheduler_topic(tenant_id, board=board)
+    await broadcast_manager.connect(topic, websocket)
+
+    # Optionally push a KPI snapshot on scheduler connect to help boards display context
+    try:
+        engine = get_engine()
+        maker = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False, autocommit=False)
+        async with maker() as session:
+            from src.db.session import tenant_context as _tenant_context
+            async with _tenant_context(session, tenant_id):
+                svc = ProductionService(session)
+                snapshot = await svc._compute_kpis_snapshot()
+        env = WsEnvelope(type="kpi.snapshot", payload=snapshot.model_dump(), channel=board).model_dump()
+        await websocket.send_json(env)
+    except Exception:
+        logger.exception("Failed to send initial KPI snapshot to scheduler client")
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            # normalize envelope
+            msg_type = data.get("type")
+            payload = data.get("payload") or {}
+            if msg_type == "ping":
+                await websocket.send_text("pong")
+                continue
+
+            if not isinstance(msg_type, str):
+                # ignore malformed
+                continue
+
+            # Rebroadcast to topic subscribers with namespaced type
+            env = WsEnvelope(type=f"scheduler.{msg_type}", payload=payload, channel=board)
+            await broadcast_manager.broadcast(topic, env.model_dump(), exclude=websocket)
+    except WebSocketDisconnect:
+        await broadcast_manager.disconnect(topic, websocket)
+    except Exception:
+        logger.exception("Error on ws_scheduler connection")
+        await broadcast_manager.disconnect(topic, websocket)
+        await websocket.close()
 
 
 # Example dependency wiring for future endpoints:

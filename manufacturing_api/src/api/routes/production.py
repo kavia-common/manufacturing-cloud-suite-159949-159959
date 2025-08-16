@@ -6,8 +6,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.deps import get_tenant_session, require_roles
+from src.core.deps import get_tenant_session, require_roles, get_tenant_id
 from src.repositories.production import WorkOrderRepository, WorkOrderOperationRepository
+from src.services.production import ProductionService
 from src.schemas.production import (
     WorkOrderRead,
     WorkOrderCreate,
@@ -48,9 +49,10 @@ async def list_work_orders(
 async def create_work_order(
     payload: WorkOrderCreate,
     session: AsyncSession = Depends(get_tenant_session),
+    tenant_id=Depends(get_tenant_id),
 ) -> WorkOrderRead:
-    repo = WorkOrderRepository(session)
-    created = await repo.create_work_order(payload)
+    svc = ProductionService(session)
+    created = await svc.create_work_order(payload, tenant_id=tenant_id)
     return WorkOrderRead.model_validate(created)
 
 
