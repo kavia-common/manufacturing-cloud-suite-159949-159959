@@ -6,6 +6,12 @@ from src.api.main import app
 # Get the OpenAPI schema
 openapi_schema = app.openapi()
 
+# Ensure Reports tag metadata is present
+tags = openapi_schema.get("tags", [])
+if not any(t.get("name") == "Reports" for t in tags):
+    tags.append({"name": "Reports", "description": "Exportable business reports (CSV/Excel/PDF)."})
+openapi_schema["tags"] = tags
+
 # Inject non-standard extension with WebSocket endpoint docs
 openapi_schema["x-websocket-endpoints"] = [
     {

@@ -31,6 +31,7 @@ from src.api.routes.production import router as production_router
 from src.api.routes.master_data import router as masterdata_router
 from src.api.routes.quality import router as quality_router
 from src.api.routes.scheduling import router as scheduling_router
+from src.api.routes.reports import router as reports_router
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -198,6 +199,7 @@ app.include_router(procurement_router)
 app.include_router(production_router)
 app.include_router(quality_router)
 app.include_router(scheduling_router)
+app.include_router(reports_router)
 
 
 async def _validate_ws_and_get_user(websocket: WebSocket) -> tuple[str, str]:
