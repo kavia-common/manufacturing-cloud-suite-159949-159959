@@ -12,6 +12,10 @@ from .session import (
     tenant_context,
 )
 
+# Import models to ensure they are registered with SQLAlchemy metadata
+# when the db package is imported.
+from . import models as models  # noqa: F401
+
 __all__ = [
     "Base",
     "Settings",
@@ -20,4 +24,5 @@ __all__ = [
     "get_async_session",
     "set_current_tenant",
     "tenant_context",
+    "models",
 ]
