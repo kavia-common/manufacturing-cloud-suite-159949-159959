@@ -53,3 +53,12 @@ from .master_data import (  # noqa: F401
     Bom,
     BomLine,
 )
+
+# Security and auth models
+from .security import (  # noqa: F401
+    User,
+    Role,
+    Permission,
+    UserRole,
+    RolePermission,
+)

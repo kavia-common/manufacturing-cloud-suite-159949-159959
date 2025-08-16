@@ -12,6 +12,11 @@ from src.db.run_migrations import main as run_alembic
 from src.db.seed import seed_all
 from src.schemas.common import MessageResponse, TenantEcho
 
+# Routers
+from src.api.routes.auth import router as auth_router
+from src.api.routes.users import router as users_router
+from src.api.routes.roles import router as roles_router
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +25,9 @@ settings = get_app_settings()
 openapi_tags = [
     {"name": "System", "description": "System and operational endpoints."},
     {"name": "Health", "description": "Liveness and readiness probes."},
+    {"name": "Auth", "description": "Authentication and token endpoints."},
+    {"name": "Users", "description": "User administration endpoints."},
+    {"name": "Roles", "description": "Role administration endpoints."},
     {
         "name": "WebSocket",
         "description": "WebSocket usage, endpoints, and connection details.",
@@ -132,6 +140,11 @@ def websocket_info() -> Dict[str, Any]:
         ),
         "endpoints": [],
     }
+
+# Register routers
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(roles_router)
 
 
 # Example dependency wiring for future endpoints:

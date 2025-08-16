@@ -5,11 +5,18 @@ from typing import AsyncGenerator
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.security import decode_token
 from src.db.session import get_async_session, tenant_context
+from src.repositories.security import SecurityRepository
 
 logger = logging.getLogger(__name__)
+
+# OAuth2 bearer (used by docs); login endpoint path referenced here
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 # PUBLIC_INTERFACE
@@ -65,3 +72,62 @@ async def get_session_no_tenant(
     """
     async for session in session_dep:
         yield session
+
+
+# PUBLIC_INTERFACE
+async def get_current_user(
+    tenant_id: UUID = Depends(get_tenant_id),
+    token: str = Depends(oauth2_scheme),
+    session: AsyncSession = Depends(get_tenant_session),
+):
+    """
+    Resolve and return the current user from the Authorization bearer token.
+
+    Validates the token, ensures tenant claim matches the incoming tenant header,
+    and loads the user via RLS-scoped session.
+    """
+    try:
+        payload = decode_token(token)
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    tok_tenant = payload.get("tenant_id")
+    if not tok_tenant or str(tok_tenant) != str(tenant_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant mismatch")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    repo = SecurityRepository(session)
+    user = await repo.get_user_by_id(UUID(user_id))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
+# PUBLIC_INTERFACE
+async def get_current_active_user(user=Depends(get_current_user)):
+    """Ensure user is active."""
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+
+
+# PUBLIC_INTERFACE
+def require_roles(*required: str):
+    """
+    Create a dependency that requires the current user to have one of the specified roles
+    (or matching permission codes).
+    """
+
+    async def _dep(user=Depends(get_current_active_user), session: AsyncSession = Depends(get_tenant_session)):
+        repo = SecurityRepository(session)
+        roles = [r.name for r in await repo.list_roles_for_user(user.id)]
+        role_set = set(roles)
+        required_set = set(required)
+        if role_set.isdisjoint(required_set):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role")
+        return True
+
+    return _dep

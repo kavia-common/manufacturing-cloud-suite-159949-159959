@@ -45,6 +45,19 @@ class AppSettings(BaseSettings):
     # Tenancy defaults (used only by utilities or examples)
     DEFAULT_TENANT_SLUG: str = Field(default="acme")
 
+    # JWT / Auth
+    JWT_SECRET_KEY: str = Field(
+        default="CHANGE_ME_DEV_ONLY",
+        description="Secret key for signing JWTs. Override in production via env.",
+    )
+    JWT_ALGORITHM: str = Field(default="HS256", description="JWT signing algorithm")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=30, description="Access token lifetime in minutes"
+    )
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=60 * 24 * 14, description="Refresh token lifetime in minutes (default 14 days)"
+    )
+
     # Environment label
     ENVIRONMENT: Optional[str] = Field(
         default=None, description="Environment label (dev/test/prod)"
